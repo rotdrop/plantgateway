@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import List, Optional
 import yaml
 import paho.mqtt.client as mqtt
-from miflora.miflora_poller import MiFloraPoller, MI_BATTERY, MI_LIGHT, MI_CONDUCTIVITY, MI_MOISTURE, MI_TEMPERATURE
+from miflora.miflora_poller import MiFloraPoller, MI_BATTERY, MI_LIGHT, MI_CONDUCTIVITY, MI_MOISTURE, MI_TEMPERATURE, MI_FWVERSION
 from btlewrap.bluepy import BluepyBackend
 
 from plantgw import __version__
@@ -34,6 +34,7 @@ class MQTTAttributes(Enum):
     MOISTURE = 'moisture'
     CONDUCTIVITY = 'conductivity'
     TIMESTAMP = 'timestamp'
+    FIRMWARE = 'firmware'
 
 
 # unit of measurement for the different attributes
@@ -43,7 +44,8 @@ UNIT_OF_MEASUREMENT = {
     MQTTAttributes.BRIGHTNESS:   'lux',
     MQTTAttributes.MOISTURE:     '%',
     MQTTAttributes.CONDUCTIVITY: 'µS/cm',
-    MQTTAttributes.TIMESTAMP:     's',
+    MQTTAttributes.TIMESTAMP:    's',
+    MQTTAttributes.FIRMWARE:     '',
 }
 
 
@@ -55,6 +57,7 @@ DEVICE_CLASS = {
     MQTTAttributes.MOISTURE:     None,
     MQTTAttributes.CONDUCTIVITY: None,
     MQTTAttributes.TIMESTAMP:    'timestamp',
+    MQTTAttributes.FIRMWARE:     None,
 }
 
 
@@ -108,7 +111,7 @@ class Configuration:
 
         for sensor_config in config['sensors']:
             fail_silent = 'fail_silent' in sensor_config
-            self.sensors.append(SensorConfig(sensor_config['mac'], sensor_config['alias'], fail_silent))
+            self.sensors.append(SensorConfig(sensor_config['mac'], sensor_config.get('alias', None), fail_silent, sensor_config.get('cache_timeout', 600), sensor_config.get('cache_retries', 3)))
 
         if 'discovery_prefix' in config['mqtt']:
             self.mqtt_discovery_prefix = config['mqtt']['discovery_prefix']
@@ -131,7 +134,7 @@ class Configuration:
 class SensorConfig:
     """Stores the configuration of a sensor."""
 
-    def __init__(self, mac: str, alias: str = None, fail_silent: bool = False):
+    def __init__(self, mac: str, alias: str = None, fail_silent: bool = False, cache_timeout: int = 600, cache_retries: int = 3):
         if mac is None:
             msg = 'mac of sensor must not be None'
             logging.error(msg)
@@ -139,12 +142,14 @@ class SensorConfig:
         self.mac = mac
         self.alias = alias
         self.fail_silent = fail_silent
+        self.cache_timeout = cache_timeout
+        self.cache_retries = cache_retries
 
     def get_topic(self) -> str:
         """Get the topic name for the sensor."""
         if self.alias is not None:
             return self.alias
-        return self.mac
+        return '0x' + self.short_mac
 
     def __str__(self) -> str:
         if self.alias:
@@ -215,6 +220,7 @@ class PlantGateway:
             MQTTAttributes.BRIGHTNESS.value:   poller.parameter_value(MI_LIGHT),
             MQTTAttributes.MOISTURE.value:     poller.parameter_value(MI_MOISTURE),
             MQTTAttributes.CONDUCTIVITY.value: poller.parameter_value(MI_CONDUCTIVITY),
+            MQTTAttributes.FIRMWARE.value:     poller.parameter_value(MI_FWVERSION),
             MQTTAttributes.TIMESTAMP.value:    datetime.now().isoformat(),
         }
         for key, value in data.items():
@@ -224,6 +230,7 @@ class PlantGateway:
         json_payload = json.dumps(data)
         self.mqtt_client.publish(state_topic, json_payload, qos=1, retain=True)
         logging.info('sent data to topic %s', state_topic)
+        logging.info('payload: %s', data)
 
     def _get_state_topic(self, sensor_config: SensorConfig) -> str:
         prefix_fmt = '{}/{}'
@@ -236,7 +243,7 @@ class PlantGateway:
     def process_mac(self, sensor_config: SensorConfig):
         """Get data from one Sensor."""
         logging.info('Getting data from sensor %s', sensor_config.get_topic())
-        poller = MiFloraPoller(sensor_config.mac, BluepyBackend)
+        poller = MiFloraPoller(sensor_config.mac, BluepyBackend, sensor_config.cache_timeout, sensor_config.cache_retries)
         self.announce_sensor(sensor_config)
         self._publish(sensor_config, poller)
 
@@ -284,16 +291,29 @@ class PlantGateway:
         if self.config.mqtt_discovery_prefix is None:
             return
         self.start_client()
-        device_name = 'plant_{}'.format(sensor_config.short_mac)
+        self_name = 'plantgateway'
+        device_name = '0x{}'.format(sensor_config.short_mac)
         for attribute in MQTTAttributes:
-            topic = '{}/sensor/{}_{}/config'.format(self.config.mqtt_discovery_prefix, device_name, attribute.value)
+            unique_id = '{}_{}_{}'.format(self_name, device_name, attribute.value)
+            topic = '{}/sensor/{}_{}/{}/config'.format(self.config.mqtt_discovery_prefix, self_name, device_name, attribute.value)
             payload = {
                 'state_topic':         self._get_state_topic(sensor_config),
+                'json_attributes_topic': self._get_state_topic(sensor_config),
                 'unit_of_measurement': UNIT_OF_MEASUREMENT[attribute],
                 'value_template':      '{{value_json.'+attribute.value+'}}',
+                'unique_id':           unique_id,
+                'device': {
+                    'identifiers': [ '{}_{}'.format(self_name, device_name), ],
+                    'name': device_name,
+                    'sw_version': 'plantgw dev',
+                    'model': "MiFlora compatible plant humidity, brightness, conductivity, temperature sensor",
+                    'manufacturer': 'to be deternmined',
+                }
             }
             if sensor_config.alias is not None:
                 payload['name'] = '{}_{}'.format(sensor_config.alias, attribute.value)
+            else:
+                payload['name'] = '{}_{}'.format(device_name, attribute.value)
 
             if DEVICE_CLASS[attribute] is not None:
                 payload['device_class'] = DEVICE_CLASS[attribute]
@@ -301,3 +321,5 @@ class PlantGateway:
             json_payload = json.dumps(payload)
             self.mqtt_client.publish(topic, json_payload, qos=1, retain=False)
             logging.info('sent sensor config to topic %s', topic)
+            logging.info('payload: %s', payload)
+            
