@@ -27,6 +27,6 @@ setup(
     author_email='christian.kuehnel@gmail.com',
     url='https://www.python.org/sigs/distutils-sig/',
     packages=['plantgw'],
-    install_requires=['bluepy==1.3.0', 'paho-mqtt', 'pyyaml>=5.1', 'miflora==0.6', 'typing>=3,<4'],
+    install_requires=['bluepy==1.3.0', 'paho-mqtt', 'pyyaml>=5.1', 'miflora==0.6.99', 'typing>=3,<4'],
     scripts=['plantgateway'],
     )
