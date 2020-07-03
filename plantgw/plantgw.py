@@ -278,7 +278,7 @@ class PlantGateway:
                         logging.warning('fail_silent is set for sensor %s, so not raising an exception.', sensor.alias)
                     else:
                         logging.exception(msg)
-                        print(msg)
+                        # print(msg)
 
         # return sensors that could not be processed after max_retry
         return next_list
